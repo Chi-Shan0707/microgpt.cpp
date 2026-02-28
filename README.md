@@ -1,8 +1,9 @@
-# MicroGPT（纯 Python 最小 GPT）
+# MicroGPT in cpp
 
 这个目录现在包含：
 - `microgpt.py`：训练 + 推理一体的最小 GPT 实现。
 - `microgpt_explainer.py`：完整可运行的 microGPT（详注版），包含【代码意图】+【LLM算法原理】+【Transformer思想】注释。
+- `microgpt_runnable.cpp`： 可运行的microgpt，就是没那么干净
 
 ## 1) 详注版 microGPT 使用
 
@@ -37,14 +38,7 @@ python microgpt.py
 
 ## 3) 未来 C++ 重写计划（To-Do）
 
-- [ ] 设计 `Value` 标量自动求导类（含计算图、拓扑反传、运算符重载）。
-- [ ] 实现张量/矩阵容器与基础算子（matmul、softmax、rmsnorm、relu）。
-- [ ] 按当前结构实现 GPT 前向：embedding -> attention -> MLP -> lm_head。
-- [ ] 实现训练循环：tokenize、loss、backward、Adam 更新、梯度清零。
-- [ ] 对齐 Python 版本超参，确保 loss 曲线趋势一致。
-- [ ] 加入推理采样（temperature、BOS 截断）。
-- [ ] 提供最小可复现脚本：build + run + 对比输出。
-- [ ] 后续再做性能版：批处理、向量化、并行、内存池。
+- [ ] 将代码变得优雅 , 创建 `microgpt.cpp`可读性更高，注释更优雅，代码也更优雅 
 
 
 ## 4 ）链接
