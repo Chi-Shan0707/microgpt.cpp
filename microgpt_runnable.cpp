@@ -8,8 +8,9 @@
 #include <map>
 #include <random>
 #include <limits>
-#include <cassert>
-#include <numeric>
+#include <algorithm>
+#include <iomanip>
+
 using namespace std;
 
 // ── 全局超参数 ────────────────────
@@ -17,36 +18,35 @@ struct Config {
     int vocab_size = 27;
     int n_embd     = 16;
     int n_head     = 4;
-    int n_layer    = 2;
+    int n_layer    = 4;
     int n_hidden   = 64;
     int block_size = 32;
-    double lr      = 0.001;
+    int training_steps = 1000;
+    double lr      = 0.005;
+    int num_samples = 20;
 } cfg;
 
 struct Value; // 前置声明
 
 // ── 内存池管理 ────────────────────
-
 // 1. 参数池：存放 WTE, WPE, Weights。整个程序运行期间不销毁。
-list<Value> param_pool;
+list<Value> param_pool; 
 // 2. 计算图池：存放中间计算结果。每一步训练（Step）结束后清空。
-list<Value> graph_pool;
+list<Value> graph_pool; 
 
 class Value
 {
 public:
-    double data;
-    double grad;
-    vector<Value*> children;
-    vector<double> local_grads;
+    double data; 
+    double grad; 
+    vector<Value*> children; 
+    vector<double> local_grads; 
 
-    Value() : data(0.0), grad(0.0) {}
+    Value() : data(0.0), grad(0.0) {}   
     explicit Value(double d) : data(d), grad(0.0) {}
 
     // 辅助函数：创建一个新节点到计算图池
-    static Value* make_new(double d,
-        const vector<Value*>& _children = {},
-        const vector<double>& _grads = {}) {
+    static Value* make_new(double d, const vector<Value*>& _children = {}, const vector<double>& _grads = {}) {
         graph_pool.emplace_back();
         Value* v = &graph_pool.back();
         v->data = d;
@@ -70,22 +70,20 @@ public:
     static Value* sub(Value* a, Value* b) {
         return make_new(a->data - b->data, {a, b}, {1.0, -1.0});
     }
-
+    
     // Log
     static Value* log(Value* a) {
         return make_new(std::log(a->data), {a}, {1.0 / a->data});
     }
 
     // Exp (用于 Softmax)
-    static Value* exp(Value* a)
-    {
+    static Value* exp(Value* a) {
         double e = std::exp(a->data);
         return make_new(e, {a}, {e});
     }
 
     // Relu
-    static Value* relu(Value* a)
-    {
+    static Value* relu(Value* a) {
         double d = (a->data > 0) ? a->data : 0.0;
         double g = (a->data > 0) ? 1.0 : 0.0;
         return make_new(d, {a}, {g});
@@ -96,9 +94,9 @@ public:
         vector<Value*> topo;
         set<Value*> visited;
         build_topo(this, topo, visited);
-
+        
         this->grad = 1.0;
-
+        
         for (auto it = topo.rbegin(); it != topo.rend(); ++it) {
             Value* v = *it;
             for (size_t i = 0; i < v->children.size(); ++i) {
@@ -121,12 +119,16 @@ private:
 class Vector {
 public:
     vector<Value*> data;
-
+    
     // 预分配大小
     void resize(size_t n, Value* val = nullptr) {
         data.resize(n, val);
     }
-    size_t size() const { return data.size(); }
+    size_t size() const { 
+        return data.size(); 
+    }
+
+
 
     Value* operator[](size_t i) const {
         return data[i];
@@ -149,7 +151,7 @@ public:
         result.resize(row);
         for (size_t i = 0; i < row; ++i) {
             // 初始化累加器（注意：需要创建一个常数0节点）
-            Value* sum = Value::make_new(0.0);
+            Value* sum = Value::make_new(0.0); 
             for (size_t j = 0; j < col; ++j) {
                 Value* prod = Value::mul(data[i][j], vec[j]);
                 sum = Value::add(sum, prod);
@@ -160,450 +162,355 @@ public:
     }
 };
 
-Vector linear(const Matrix& weights, const Vector& input)
-{
-    return weights * input;
+// ── 基础算子 (适配 Value*) ────────────────
+Vector add(const Vector& a, const Vector& b) {
+    Vector res; res.resize(a.size());
+    for(size_t i=0; i<a.size(); ++i) res[i] = Value::add(a[i], b[i]);
+    return res;
 }
 
-// softmax：对每个 logit 节点做 exp，累加，再除以总和
-// 返回的每个 Value* 都连接在计算图中，梯度可以反传
-Vector softmax(const Vector& logits)
-{
-    size_t n = logits.size();
-    // 数值稳定性：找最大值（只用 data，不参与梯度）
-    double max_val = -std::numeric_limits<double>::infinity();
-    for (size_t i = 0; i < n; ++i)
-        max_val = max(max_val, logits[i]->data);
+Vector scale(double s, const Vector& v) {
+    Vector res; res.resize(v.size());
+    Value* s_node = Value::make_new(s); // 常数节点
+    for(size_t i=0; i<v.size(); ++i) res[i] = Value::mul(s_node, v[i]);
+    return res;
+}
 
-    // 计算 exp(logit - max)，shift 节点的梯度直接传给 logit[i]
-    vector<Value*> exps(n);
-    for (size_t i = 0; i < n; ++i) {
-        Value* shifted = Value::make_new(logits[i]->data - max_val, {logits[i]}, {1.0});
-        exps[i] = Value::exp(shifted);
+Vector softmax(const Vector& logits) {
+    Vector res; res.resize(logits.size());
+    double max_val = -1e9;
+    for(auto v : logits.data) if(v->data > max_val) max_val = v->data;
+    
+    // 这一步虽然不反传 max_val 的梯度，但为了数值稳定性，通常只做 data 计算
+    Value* max_node = Value::make_new(max_val); // 常数
+    
+    vector<Value*> exps;
+    Value* sum_exp = Value::make_new(0.0);
+    
+    for(auto v : logits.data) {
+        Value* shifted = Value::sub(v, max_node);
+        Value* e = Value::exp(shifted);
+        exps.push_back(e);
+        sum_exp = Value::add(sum_exp, e);
     }
-
-    // 求和
-    Value* sum_val = Value::make_new(0.0);
-    for (size_t i = 0; i < n; ++i)
-        sum_val = Value::add(sum_val, exps[i]);
-
-    // 归一化：p[i] = exp[i] / sum
-    Vector result;
-    result.resize(n);
-    for (size_t i = 0; i < n; ++i) {
-        double ei = exps[i]->data;
-        double s  = sum_val->data;
-        // dc/d(exp[i]) = 1/s, dc/d(sum) = -exp[i]/s^2
-        result[i] = Value::make_new(ei / s, {exps[i], sum_val}, {1.0 / s, -ei / (s * s)});
+    
+    // 此时 sum_exp 是整个图的一部分，包含完整的梯度链
+    // 既然没有除法算子，我们用 x * (sum^-1) 或者扩充除法
+    // 这里我们简单扩充一个 Value::div 辅助
+    for(size_t i=0; i<logits.size(); ++i) {
+        // div 实现： a * (b^-1)
+        Value* inv_sum = Value::make_new(1.0 / sum_exp->data, {sum_exp}, {-1.0 / (sum_exp->data * sum_exp->data)});
+        res[i] = Value::mul(exps[i], inv_sum);
     }
-    return result;
+    return res;
 }
 
-// 逐元素 relu，返回连接计算图的 Value*
-Vector relu(const Vector& input)
-{
-    Vector result;
-    result.resize(input.size());
-    for (size_t i = 0; i < input.size(); ++i)
-        result[i] = Value::relu(input[i]);
-    return result;
+Vector relu(const Vector& input) {
+    Vector res; res.resize(input.size());
+    for(size_t i=0; i<input.size(); ++i) res[i] = Value::relu(input[i]);
+    return res;
 }
 
-// 向量点积：a·b = Σ a[i]->data * b[i]->data（返回 double，不入图）
-double dot(const Vector& a, const Vector& b)
-{
-    double sum = 0.0;
-    for (size_t i = 0; i < a.size(); ++i)
-        sum += a[i]->data * b[i]->data;
-    return sum;
-}
-
-// 标量乘向量：s * v（标量不入图）
-Vector scale(double s, const Vector& v)
-{
-    Vector result;
-    result.resize(v.size());
-    for (size_t i = 0; i < v.size(); ++i)
-        result[i] = Value::mul(v[i], Value::make_new(s));
-    return result;
-}
-
-// 向量逐元素加法：a + b
-Vector add(const Vector& a, const Vector& b)
-{
-    Vector result;
-    result.resize(a.size());
-    for (size_t i = 0; i < a.size(); ++i)
-        result[i] = Value::add(a[i], b[i]);
-    return result;
-}
-
-Vector resnorm(const Vector& input)
-{
-    double sum_sq = 0.0;
-    for (size_t i = 0; i < input.size(); ++i)
-        sum_sq += input[i]->data * input[i]->data;
-    double norm = sqrt(sum_sq);
-
-    Vector result;
-    result.resize(input.size());
-    for (size_t i = 0; i < input.size(); ++i)
-        result[i] = Value::make_new(input[i]->data / norm, {input[i]}, {1.0 / norm});
-    return result;
-}
-
-
-struct AttentionBlock
-{
-    Matrix wq, wk, wv; // 权重矩阵
+// ── 神经网络模块 ────────────────
+struct AttentionBlock {
+    Matrix wq, wk, wv, wo; // 加个 wo (output projection) 比较完整，或者省略
     size_t n_embd, n_head, head_dim;
-    Vector forward(const Vector& x, vector<Vector>& keys, vector<Vector>& values)
-    {
-        // ── 第一步：投影 Q / K / V ──────────────────────────────
-        Vector q = wq * x;  // 当前 token："要查什么"
-        Vector k = wk * x;  // 当前 token："能提供什么"
-        Vector v = wv * x;  // 当前 token："实际内容"
 
-        // 把本次的 k, v 追加到历史缓存（KV cache）
+    Vector forward(const Vector& x, vector<Vector>& keys, vector<Vector>& values) {
+        Vector q = wq * x;
+        Vector k = wk * x;
+        Vector v = wv * x;
+        
         keys.push_back(k);
         values.push_back(v);
-
-        // ── 第二步：计算每个历史位置的 attention score ─────────
-        // score[i] = dot(q, keys[i]) / sqrt(head_dim)
+        
+        // Multi-head logic simplified to 1 head for clarity if dims match, 
+        // or strictly follow splitting. 为了配合你的代码逻辑，这里假设 n_head 维度在内部处理
+        // 你的代码原逻辑其实类似于 Single Head Attention (所有维度一起算)，这在微型模型里没问题。
+        
+        // 计算 Score
         size_t seq_len = keys.size();
-        Vector scores;
-        scores.resize(seq_len);
+        Vector scores; scores.resize(seq_len);
         double scale_factor = 1.0 / sqrt((double)head_dim);
-        for (size_t i = 0; i < seq_len; ++i)
-            scores[i] = Value::make_new(dot(q, keys[i]) * scale_factor);
+        Value* scale_node = Value::make_new(scale_factor);
 
-        // ── 第三步：softmax → 权重（和为 1）───────────────────
+        for(size_t t=0; t<seq_len; ++t) {
+            // Dot product q · k_t
+            Value* dot = Value::make_new(0.0);
+            for(size_t i=0; i<q.size(); ++i) {
+                dot = Value::add(dot, Value::mul(q[i], keys[t][i]));
+            }
+            scores[t] = Value::mul(dot, scale_node);
+        }
+        
         Vector weights = softmax(scores);
-
-        // ── 第四步：加权求和 values ────────────────────────────
-        // output = Σ weights[i] * values[i]
-        Vector output;
-        output.resize(n_embd, Value::make_new(0.0));
-        for (size_t i = 0; i < seq_len; ++i)
-            output = add(output, scale(weights[i]->data, values[i]));
-
-        return output;
-    }
-};
-
-struct MLPBlock
-//这个写起来比AttentionBlock简单，因为它只有两次线性变换
-{
-    Matrix w1, w2; // 权重矩阵
-    size_t n_embd, n_hidden;
-    Vector forward(const Vector& x)
-    {
-        Vector hidden = relu(linear(w1, x));
-        /**
-         * x = relu(linear(w1, x))
-         *
-         * 这样会报错，因为我们和编译器说了x不被更改
-         * 这也体现了一个好习惯：函数参数用 const& 表达"我只读这个输入"，内部计算结果用局部变量承接。
-         */
-        return linear(w2, hidden);           // hidden (n_hidden) → output (n_embd)
-    }
-};
-
-class Tokenize
-{
-public:
-    vector<char> vocab;        // 词表：下标即 token_id，值为对应字符
-    map<char, int> char_to_id; // 字符 → token_id 的映射
-    int BOS;                   // Begin-Of-Sequence 特殊 token 的 id
-
-    vector<int> encode(const string& text)
-    {
-        vector<int> tokens;
-        for (char ch : text) {
-            auto it = char_to_id.find(ch);
-            if (it != char_to_id.end()) {
-                tokens.push_back(it->second); // 转换为 token_id
-            } else {
-                tokens.push_back(BOS); // 未知字符用 BOS 代替
+        
+        // Weighted Sum
+        Vector output; output.resize(n_embd);
+        for(size_t i=0; i<n_embd; ++i) output[i] = Value::make_new(0.0);
+        
+        for(size_t t=0; t<seq_len; ++t) {
+            Value* w = weights[t];
+            for(size_t i=0; i<n_embd; ++i) {
+                output[i] = Value::add(output[i], Value::mul(w, values[t][i]));
             }
         }
-        return tokens;
-    }
-
-    string decode(const vector<int>& tokens)
-    {
-        string text;
-        for (int token_id : tokens) {
-            if (token_id >= 0 && token_id < (int)vocab.size()) {
-                text += vocab[token_id]; // token_id → 字符
-            } else {
-                text += '?'; // 无效 id 用 '?' 代替
-            }
-        }
-        return text;
+        return output; 
     }
 };
 
-struct GPT
+struct MLPBlock 
 {
-    // ── 嵌入层参数 ────────────────────────────────────────────────────
-    Matrix wte;      // Token  Embedding：词表大小 × n_embd
-                     //   作用：把 token_id（整数）查表变成 n_embd 维向量
-                     //   例：token_id=5 → wte 第5行 → 一个 n_embd 维向量
+    Matrix w1, w2;
 
-    Matrix wpe;      // Position Embedding：最大序列长度 × n_embd
-                     //   作用：把位置编号（0,1,2,...）变成 n_embd 维向量
-                     //   例：pos_id=3 → wpe 第3行 → 一个 n_embd 维向量
+    Vector forward(const Vector& x) {
+        return w2 * relu(w1 * x);
+    }
+};
 
-    Matrix lm_head;  // 语言模型输出头：vocab_size × n_embd
-                     //   作用：把最终隐藏状态映射回词表大小的 logits
-                     //   例：n_embd 维向量 → vocab_size 维 logits → softmax → 概率分布
+// ── 模型类 ────────────────
+struct GPT {
+    Matrix wte, wpe, lm_head;
+    vector<AttentionBlock> attn_blocks;
+    vector<MLPBlock> mlp_blocks;
 
-    // ── Transformer 层（每层配对一个 Attention + 一个 MLP）────────────
-    vector<AttentionBlock> attn_blocks; // N 层 Attention，每层调用 AttentionBlock::forward
-    vector<MLPBlock>       mlp_blocks;  // N 层 MLP，与 attn_blocks 一一对应
-
-    // ── 前向传播 ──────────────────────────────────────────────────────
-    // 工作流程：
-    //   步骤1  Embedding：x = wte[token_id] + wpe[pos_id]
-    //   步骤2  逐层串行执行（共 N 层）：
-    //            x = AttentionBlock.forward(x, keys, values)
-    //            x = MLPBlock.forward(x)
-    //   步骤3  输出头：logits = lm_head * x   (vocab_size 维)
-    Vector forward(int token_id, int pos_id, vector<Vector>& keys, vector<Vector>& values)
+    Vector forward(int token_id, int pos_id,
+                   vector<vector<Vector>>& layer_keys,
+                   vector<vector<Vector>>& layer_values)
     {
-        // 步骤1：Embedding 层——直接取矩阵对应行（查表，不是矩阵乘法）
-        // wte.data[token_id] 就是词表第 token_id 行，存储 Value* 指针
-        Vector tok_emb; tok_emb.data = wte.data[token_id]; // Token Embedding
-        Vector pos_emb; pos_emb.data = wpe.data[pos_id];   // Position Embedding
-        Vector x = add(tok_emb, pos_emb);                  // x = tok_emb + pos_emb
+        Vector tok; tok.data = wte.data[token_id]; 
+        Vector pos; pos.data = wpe.data[pos_id];
+        Vector x = add(tok, pos);
 
-        // 步骤2：逐层 Attention → MLP（串行！不是并行！）
-        for (size_t i = 0; i < attn_blocks.size(); ++i)
-        {
-            x = attn_blocks[i].forward(x, keys, values); // Attention：聚合历史信息
-            x = mlp_blocks[i].forward(x);                // MLP：对聚合结果做非线性变换
-            // 注：完整实现还需在此处加 RMSNorm + 残差连接
+        for(size_t i=0; i<attn_blocks.size(); ++i) {
+            // Attention + Residual
+            Vector attn_out = attn_blocks[i].forward(x, layer_keys[i], layer_values[i]);
+            x = add(x, attn_out); 
+            
+            // MLP + Residual
+            Vector mlp_out = mlp_blocks[i].forward(x);
+            x = add(x, mlp_out);
         }
-
-        // 步骤3：输出头，得到 vocab_size 维 logits
         return lm_head * x;
     }
 
-    // 收集模型所有可训练参数的指针，供优化器使用
-    vector<Value*> params()
+    // 收集所有参数指针 (指向 param_pool)
+    vector<Value*> params() 
     {
         vector<Value*> ps;
-        // 辅助 lambda：把一个 Matrix 的所有 Value* 追加进 ps
-        auto add_matrix = [&](Matrix& m) {
-            for (auto& row : m.data)
-                for (auto& val : row)
-                    ps.push_back(val);
+        auto add_mat = [&](Matrix& m) {
+            for(auto& r : m.data) for(auto& v : r) ps.push_back(v);
         };
-        add_matrix(wte);
-        add_matrix(wpe);
-        add_matrix(lm_head);
-        for (auto& blk : attn_blocks) {
-            add_matrix(blk.wq);
-            add_matrix(blk.wk);
-            add_matrix(blk.wv);
+        add_mat(wte); add_mat(wpe); add_mat(lm_head);
+        for(auto& b : attn_blocks) 
+        { 
+            add_mat(b.wq); 
+            add_mat(b.wk); 
+            add_mat(b.wv); 
         }
-        for (auto& blk : mlp_blocks) {
-            add_matrix(blk.w1);
-            add_matrix(blk.w2);
+        for(auto& b : mlp_blocks) 
+        { 
+            add_mat(b.w1); 
+            add_mat(b.w2); 
         }
         return ps;
     }
 };
 
-void SGD_step(vector<Value*>& params, double lr)
-{
-    for (auto& param : params) {
-        param->data -= lr * param->grad; // 更新参数：θ = θ - lr * dL/dθ
-        param->grad = 0.0; // 清零梯度，为下一轮计算做准备
-    }
-}
-
-void train(GPT& model, const vector<string>& data, Tokenize& tokenizer,
-           int num_steps, int log_interval = 100)
-{
-    for (int step = 0; step < num_steps; ++step)
-    {
-        // 【关键】每一步清空计算图，但保留参数（param_pool 不清空）
-        graph_pool.clear();
-
-        // 1. 采样 + 构建 token 序列：BOS + encode(doc) + BOS
-        string doc = data[step % data.size()];
-        vector<int> tokens = {tokenizer.BOS};          // 前置 BOS
-        vector<int> encoded = tokenizer.encode(doc);
-        tokens.insert(tokens.end(), encoded.begin(), encoded.end());
-        tokens.push_back(tokenizer.BOS);               // 后置 BOS
-
-        // 2. 前向传播：对每个位置预测下一个 token
-        vector<Vector> keys, values; // KV cache（从空开始，每个位置追加）
-        Value* total_loss = Value::make_new(0.0);
-        int count = 0;
-
-        for (int pos = 0; pos < (int)tokens.size() - 1; ++pos)
-        {
-            Vector logits = model.forward(tokens[pos], pos, keys, values);
-            Vector probs  = softmax(logits);
-
-            // Cross Entropy Loss: -log(probs[target])
-            int target       = tokens[pos + 1];
-            Value* prob      = probs[target];
-            Value* log_prob  = Value::log(prob);
-            total_loss = Value::sub(total_loss, log_prob); // loss += -log(p)
-            count++;
-        }
-
-        // 3. 平均损失 = total_loss / count
-        Value* mean_loss = Value::mul(total_loss, Value::make_new(1.0 / count));
-
-        // 4. 反向传播
-        mean_loss->backward();
-
-        // 5. SGD 更新参数（在梯度算完之后立刻更新）
-        auto ps = model.params();
-        SGD_step(ps, cfg.lr);
-
-        if (step % log_interval == 0)
-        {
-            cout << "Step " << step << ", Loss: " << mean_loss->data << endl;
-        }
-    }
-}
-
-// 按概率分布随机采样一个 token_id
-// temperature 应在调用 softmax 前除到 logits 上；
-// 这里 probs 已经是 softmax 结果，直接加权随机采样
-int sample(const Vector& probs, double /*temperature*/)
-{
-    static mt19937 rng(42); // 固定种子，方便复现
-    vector<double> p;
-    for (size_t i = 0; i < probs.size(); ++i)
-        p.push_back(probs[i]->data);
-    discrete_distribution<int> dist(p.begin(), p.end());
-    return dist(rng);
-}
-
-// tokenizer 以参数传入，不放进 GPT 里——职责分离：GPT 只管向量计算
-string generate(GPT& model, Tokenize& tokenizer, int max_len = 16, double temp = 0.5)
-{
-    vector<Vector> keys, values; // KV cache（从空开始）
-
-    int token_id = tokenizer.BOS; // 从 BOS 开始生成
-    vector<int> generated;
-
-    for (int pos = 0; pos < max_len; ++pos)
-    {
-        Vector logits  = model.forward(token_id, pos, keys, values);
-        Vector probs   = softmax(logits);
-        token_id       = sample(probs, temp);
-
-        if (token_id == tokenizer.BOS)
-            break; // 遇到 BOS（当作 EOS）停止生成
-
-        generated.push_back(token_id);
-    }
-    return tokenizer.decode(generated);
-}
-
-// 辅助函数：创建 rows×cols 的随机初始化矩阵（小随机数）
-// 参数存入 param_pool，整个训练期间不销毁
-Matrix rand_matrix(int rows, int cols)
-{
-    static mt19937 rng(123);
-    normal_distribution<double> dist(0.0, 0.02); // 均值0、标准差0.02 的小随机数
-    Matrix m;
-    m.row = rows;
-    m.col = cols;
+// ── 初始化工具 (放入 param_pool) ────────────────
+Matrix rand_matrix(int rows, int cols) {
+    static mt19937 rng(42);
+    normal_distribution<double> dist(0.0, 0.2); // 稍微加大初始化方差
+    Matrix m; m.row = rows; m.col = cols;
     m.data.resize(rows, vector<Value*>(cols));
-    for (int i = 0; i < rows; ++i)
-        for (int j = 0; j < cols; ++j) {
+    for(int i=0; i<rows; ++i) {
+        for(int j=0; j<cols; ++j) {
+            // 【关键】参数存入永久池 param_pool
             param_pool.emplace_back(dist(rng));
             m.data[i][j] = &param_pool.back();
         }
+    }
     return m;
 }
 
-int main()
+// ── Tokenizer ────────────────
+class Tokenize 
 {
-    // ═══ 1. 读取训练数据 ═══════════════════════════════════════
+public:
+    vector<char> vocab;
+    map<char, int> char_to_id;
+    int BOS;
+    vector<int> encode(const string& text) {
+        vector<int> tokens;
+        for (char ch : text) {
+            if (char_to_id.count(ch)) tokens.push_back(char_to_id[ch]);
+            else tokens.push_back(BOS);
+        }
+        return tokens;
+    }
+    string decode(const vector<int>& tokens) {
+        string s;
+        for(int id : tokens) if(id >=0 && id < (int)vocab.size() && id != BOS) s += vocab[id];
+        return s;
+    }
+};
+// 按照给定的概率分布进行随机采样
+int sample(const Vector& probs) 
+{
+    // 建议在实际使用中把 42 换成 std::random_device{}() 以获得真正的随机生成
+    static mt19937 rng(std::random_device{}()); 
+    
+    vector<double> p;
+    for (size_t i = 0; i < probs.size(); ++i) {
+        // 提取前向传播的 data 值
+        p.push_back(probs[i]->data);
+    }
+    
+    // discrete_distribution 会自动根据传入的权重数组进行轮盘赌采样
+    discrete_distribution<int> dist(p.begin(), p.end());
+    return dist(rng);
+}
+// tokenizer 以参数传入，不放进 GPT 里——职责分离：GPT 只管向量计算
+string generate(GPT& model, Tokenize& tokenizer, int max_len = 16, double temp = 0.5) 
+{
+    // 【关键】生成开始前，清空计算图，防止与上一轮训练的数据混淆
+    graph_pool.clear();
+
+    int n_layers = (int)model.attn_blocks.size();
+    vector<vector<Vector>> layer_keys(n_layers), layer_values(n_layers); // 按层独立 KV cache
+    int token_id = tokenizer.BOS; // 从 BOS 开始生成
+    vector<int> generated;
+
+    for (int pos = 0; pos < max_len; ++pos) 
+    {
+        // 1. 前向传播：模型会把中间结果放入 graph_pool，并更新 keys, values
+        Vector logits = model.forward(token_id, pos, layer_keys, layer_values);
+        
+        // 2. 温度缩放 (Temperature Scaling)
+        // 注意：必须在 softmax 之前，将 logits 除以 temperature
+        Vector scaled_logits; 
+        scaled_logits.resize(logits.size());
+        for(size_t i = 0; i < logits.size(); ++i) {
+            // temp 越小，分布越尖锐（越贪心）；temp 越大，分布越平缓（越多幻觉）
+            scaled_logits[i] = Value::make_new(logits[i]->data / temp); 
+        }
+
+        // 3. 转化为概率
+        Vector probs = softmax(scaled_logits);
+        
+        // 4. 根据概率采样下一个 token
+        token_id = sample(probs);
+
+        if (token_id == tokenizer.BOS) {
+            break; // 遇到 BOS（当作 EOS）停止生成
+        }
+
+        generated.push_back(token_id);
+        
+        // 【警告】这里绝对不能调用 graph_pool.clear()！
+        // 否则 KV cache 指向的内存会被释放，下一步生成将发生段错误。
+    }
+    
+    // 【收尾】生成结束后，清空计算图，释放这 max_len 步产生的临时节点
+    graph_pool.clear();
+    
+    return tokenizer.decode(generated);
+}
+// ── 主程序 ────────────────
+int main() {
+    // 1. Data
+    freopen("input_names.txt", "r", stdin);
     vector<string> data;
-    ifstream fin("input.txt");
-    if (fin.is_open()) {
-        string line;
-        while (getline(fin, line))
-            if (!line.empty()) data.push_back(line);
-        fin.close();
+    string line;
+    while (getline(cin, line))
+    {
+        if (!line.empty()) data.push_back(line);
     }
-    if (data.empty()) {
-        // 没有 input.txt 就用硬编码示例（简单英文名字）
-        data = {"emma", "olivia", "ava", "luna", "sophia", "mia", "harper",
-                "isabella", "amelia", "evelyn", "abigail", "ella", "charlotte"};
-    }
-    cout << "Training samples: " << data.size() << endl;
-
-    // ═══ 2. 构建 Tokenizer（从训练数据中收集所有字符）═════════════
-    set<char> charset;
-    for (auto& s : data)
-        for (char c : s)
-            charset.insert(c);
-
+    // 2. Tokenizer
     Tokenize tokenizer;
-    for (char c : charset) {
-        tokenizer.char_to_id[c] = (int)tokenizer.vocab.size();
+    set<char> chars;
+    for(auto& s: data) for(char c: s) chars.insert(c);
+    for(char c: chars) {
+        tokenizer.char_to_id[c] = tokenizer.vocab.size();
         tokenizer.vocab.push_back(c);
     }
-    tokenizer.BOS = (int)tokenizer.vocab.size(); // BOS id = 词表末尾
-    tokenizer.vocab.push_back('#');               // BOS 占位
+    tokenizer.BOS = tokenizer.vocab.size();
+    tokenizer.vocab.push_back('#');
+    cfg.vocab_size = tokenizer.vocab.size();
 
-    // ═══ 3. 更新配置 ═══════════════════════════════════════════
-    cfg.vocab_size = (int)tokenizer.vocab.size();
-    cout << "Vocab size: " << cfg.vocab_size << " (" << cfg.vocab_size - 1 << " chars + BOS)" << endl;
-
-    // ═══ 4. 初始化 GPT 模型（随机权重）═══════════════════════════
+    // 3. Init Model
     GPT model;
-    model.wte     = rand_matrix(cfg.vocab_size, cfg.n_embd);  // 词表大小 × n_embd
-    model.wpe     = rand_matrix(cfg.block_size, cfg.n_embd);  // 最大序列长 × n_embd
-    model.lm_head = rand_matrix(cfg.vocab_size, cfg.n_embd);  // 词表大小 × n_embd
-
+    model.wte = rand_matrix(cfg.vocab_size, cfg.n_embd);
+    model.wpe = rand_matrix(cfg.block_size, cfg.n_embd);
+    model.lm_head = rand_matrix(cfg.vocab_size, cfg.n_embd); // Fix dimensions
+    
+    // Init blocks
     int head_dim = cfg.n_embd / cfg.n_head;
-    for (int i = 0; i < cfg.n_layer; ++i) {
-        // 每层一个 AttentionBlock
+    for(int i=0; i<cfg.n_layer; ++i) {
         AttentionBlock attn;
-        attn.n_embd   = cfg.n_embd;
-        attn.n_head   = cfg.n_head;
-        attn.head_dim = head_dim;
+        attn.n_embd = cfg.n_embd; attn.n_head = cfg.n_head; attn.head_dim = head_dim;
         attn.wq = rand_matrix(cfg.n_embd, cfg.n_embd);
         attn.wk = rand_matrix(cfg.n_embd, cfg.n_embd);
         attn.wv = rand_matrix(cfg.n_embd, cfg.n_embd);
         model.attn_blocks.push_back(attn);
-
-        // 每层一个 MLPBlock
+        
         MLPBlock mlp;
-        mlp.n_embd   = cfg.n_embd;
-        mlp.n_hidden = cfg.n_hidden;
-        mlp.w1 = rand_matrix(cfg.n_hidden, cfg.n_embd);  // n_embd → n_hidden
-        mlp.w2 = rand_matrix(cfg.n_embd, cfg.n_hidden);  // n_hidden → n_embd
+        mlp.w1 = rand_matrix(cfg.n_hidden, cfg.n_embd);
+        mlp.w2 = rand_matrix(cfg.n_embd, cfg.n_hidden);
         model.mlp_blocks.push_back(mlp);
     }
-    cout << "Model initialized: " << cfg.n_layer << " layers, "
-         << cfg.n_embd << " dim, " << cfg.n_head << " heads" << endl;
 
-    // ═══ 5. 训练 ═══════════════════════════════════════════════
-    int num_steps = 100;
-    cout << "\nStarting training for " << num_steps << " steps..." << endl;
-    train(model, data, tokenizer, num_steps, /*log_interval=*/10);
+    // 4. Train Loop
+    cout << "Start training..." << endl;
+    for(int step=0; step< cfg.training_steps; ++step) {
+        // 【关键】每一步清空计算图，但保留参数
+        graph_pool.clear();
+        
+        string doc = data[step % data.size()];
+        vector<int> tokens = {tokenizer.BOS};
+        auto enc = tokenizer.encode(doc);
+        tokens.insert(tokens.end(), enc.begin(), enc.end());
+        tokens.push_back(tokenizer.BOS);
+        
+        int n_layers = (int)model.attn_blocks.size();
+        vector<vector<Vector>> layer_keys(n_layers), layer_values(n_layers);
+        Value* total_loss = Value::make_new(0.0);
+        int count = 0;
 
+        for(size_t pos=0; pos<tokens.size()-1; ++pos) {
+            Vector logits = model.forward(tokens[pos], pos, layer_keys, layer_values);
+            Vector probs = softmax(logits);
+            
+            // Cross Entropy Loss: -log(probs[target])
+            int target = tokens[pos+1];
+            Value* prob = probs[target];
+            Value* log_prob = Value::log(prob);
+            total_loss = Value::sub(total_loss, log_prob); // loss += -log(p)
+            count++;
+        }
+        
+        // Mean Loss
+        Value* mean_loss = Value::mul(total_loss, Value::make_new(1.0/count));
+        
+        // Backward
+        mean_loss->backward();
+        
+        // SGD
+        for(auto p : model.params()) {
+            p->data -= 0.05 * p->grad; // Learning Rate
+            p->grad = 0.0; // Zero grad
+        }
+        
+        if(step % 10 == 0) {
+            cout << "Step " << step << " Loss: " << mean_loss->data << endl;
+        }
+    }
     // ═══ 6. 生成示例 ═══════════════════════════════════════════
     cout << "\n=== Generated samples ===" << endl;
-    for (int i = 0; i < 5; ++i) {
-        // temp=0.8: 比较保守的生成; temp=1.0: 完全按原始概率生成
+    for (int i = 0; i < cfg.num_samples; ++i) {
+        // temp=0.5: 比较保守的生成; temp=1.0: 完全按原始概率生成
         string result = generate(model, tokenizer, cfg.block_size, 0.8);
         cout << "  [" << i << "] " << result << endl;
     }
-
     return 0;
 }
