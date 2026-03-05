@@ -11,8 +11,6 @@
 #include <algorithm>
 #include <iomanip>
 using namespace std;
-
-//  ──────────── global hyperparameters ────────────
 struct Config {
     int num_vocab = 27;
     int dim_embd     = 16;
@@ -24,7 +22,6 @@ struct Config {
     double lr      = 0.005;
     int num_samples = 20;
 } cfg;
-
 struct Value;
 list<Value> param_pool, graph_pool;
 class Value
@@ -155,9 +152,7 @@ struct AttentionBlock {
 };
 struct MLPBlock{
     Matrix W1,W2;
-    Vector forward(const Vector& x) {
-        return W2 * relu(W1 * x);
-    }
+    Vector forward(const Vector& x) {   return W2 * relu(W1 * x);   }
 };
 struct GPT{
     Matrix wte , wpe, lm_head;
@@ -176,8 +171,7 @@ struct GPT{
         Vector logits = lm_head * x;
         return logits;
     }
-    vector<Value*> params()
-    {
+    vector<Value*> params() {
         vector<Value*> ps;
         auto add = [&](auto& m) {
             for (auto& r : m.data)
@@ -235,16 +229,12 @@ string generate(GPT& model, Tokenize& tokenizer, int max_len = 16, double temp =
     }
     return tokenizer.decode(generated);
 }
-
 int main()
 {
-    // ── Read Data ──
     freopen("input_names.txt", "r", stdin);
     vector<string> data;
     string line;
     while (getline(cin, line)) if (!line.empty()) data.push_back(line);
-    
-    // ── Build Tokenizer ──
     Tokenize tokenizer;
     set<char> chars;
     for(auto& s: data) for(char c: s) chars.insert(c);
@@ -252,20 +242,15 @@ int main()
         tokenizer.char_to_id[c] = tokenizer.vocab.size();
         tokenizer.vocab.push_back(c);
     }
-    tokenizer.BOS = tokenizer.vocab.size();
-    tokenizer.EOS = tokenizer.vocab.size() + 1;
-    tokenizer.UNK = tokenizer.vocab.size() + 2;
+    tokenizer.BOS = tokenizer.vocab.size();tokenizer.EOS = tokenizer.vocab.size() + 1;tokenizer.UNK = tokenizer.vocab.size() + 2;
     tokenizer.vocab.push_back('#'); // BOS
     tokenizer.vocab.push_back('#'); // EOS
     tokenizer.vocab.push_back('?'); // UNK
     cfg.num_vocab = tokenizer.vocab.size();
-
-    // ── Initialize Model ──
     GPT model;
-    model.wte = Matrix(); model.wte.row = cfg.num_vocab; model.wte.col = cfg.dim_embd;
-    model.wpe = Matrix(); model.wpe.row = cfg.dim_block; model.wpe.col = cfg.dim_embd;
-    model.lm_head = Matrix(); model.lm_head.row = cfg.num_vocab; model.lm_head.col = cfg.dim_embd;
-    
+    model.wte = Matrix();       model.wte.row = cfg.num_vocab;      model.wte.col = cfg.dim_embd;
+    model.wpe = Matrix();       model.wpe.row = cfg.dim_block;      model.wpe.col = cfg.dim_embd;
+    model.lm_head = Matrix();   model.lm_head.row = cfg.num_vocab;  model.lm_head.col = cfg.dim_embd;
     auto init_matrix = [](Matrix& m) {
         static mt19937 rng(42);
         normal_distribution<double> dist(0.0, 0.2);
@@ -278,7 +263,6 @@ int main()
         }
     };
     init_matrix(model.wte); init_matrix(model.wpe); init_matrix(model.lm_head);
-    
     int head_dim = cfg.dim_embd / cfg.num_head;
     for(int i=0; i<cfg.num_layer; ++i) {
         AttentionBlock attn;
@@ -288,26 +272,21 @@ int main()
         attn.Wv = Matrix(); attn.Wv.row = cfg.dim_embd; attn.Wv.col = cfg.dim_embd;
         init_matrix(attn.Wq); init_matrix(attn.Wk); init_matrix(attn.Wv);
         model.attn_blocks.push_back(attn);
-        
         MLPBlock mlp;
         mlp.W1 = Matrix(); mlp.W1.row = cfg.dim_hidden; mlp.W1.col = cfg.dim_embd;
         mlp.W2 = Matrix(); mlp.W2.row = cfg.dim_embd; mlp.W2.col = cfg.dim_hidden;
         init_matrix(mlp.W1); init_matrix(mlp.W2);
         model.mlp_blocks.push_back(mlp);
     }
-
-    // ── Training Loop ──
     cout << "Training..." << endl;
     for(int step = 0; step < cfg.num_training_steps; ++step) {
         graph_pool.clear();
         const string& doc = data[step % data.size()];
         vector<int> tokens = tokenizer.encode(doc);
-        
         int n_layers = model.attn_blocks.size();
         vector<vector<Vector>> layer_keys(n_layers), layer_values(n_layers);
         Value* total_loss = Value::make_new(0.0);
         int count = 0;
-
         for(size_t pos = 0; pos < tokens.size() - 1; ++pos) {
             Vector logits = model.forward(tokens[pos], pos, layer_keys, layer_values);
             Vector probs = softmax(logits);
@@ -315,23 +294,18 @@ int main()
             Value* prob = probs.data[target];
             Value* log_prob = Value::log(prob);
             total_loss = Value::sub(total_loss, log_prob);
-            count++;
+            ++count;
         }
-        
         Value* mean_loss = Value::mul(total_loss, Value::make_new(1.0 / count));
         mean_loss->backward();
-        
         for(auto p : model.params()) {
             p->data -= cfg.lr * p->grad;
             p->grad = 0.0;
         }
-        
         if(step % 10 == 0) {
             cout << "Step " << step << " Loss: " << mean_loss->data << endl;
         }
     }
-    
-    // ── Generation ──
     cout << "\n=== Generated Samples ===" << endl;
     for(int i = 0; i < cfg.num_samples; ++i) {
         string result = generate(model, tokenizer, cfg.dim_block, 0.8);

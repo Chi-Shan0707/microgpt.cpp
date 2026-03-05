@@ -2,3 +2,13 @@
 /.vscode
 .o
 microgpt_runnable
+NOTES.md
+generate_equations
+generate_equations.cpp
+input_math.txt
+input_names.txt
+microgpt_annotate.py
+mty.cpp
+mty.py
+todolist.md
+microgpt
