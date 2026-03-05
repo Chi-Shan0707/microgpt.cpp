@@ -1,35 +1,25 @@
-#include <iostream>
-#include <fstream>
-#include <string>
-#include <set>
-#include <vector>
-#include <list>
-#include <cmath>
-#include <map>
-#include <random>
-#include <limits>
-#include <algorithm>
-#include <iomanip>
+#include <bits/stdc++.h>
 using namespace std;
+
 struct Config {
-    int num_vocab = 27;
-    int dim_embd     = 16;
-    int num_head     = 4;
-    int num_layer    = 4;
-    int dim_hidden   = 64;
-    int dim_block = 32;
-    int num_training_steps = 1000;
-    double lr      = 0.005;
-    int num_samples = 20;
+    int num_vocab           = 27;
+    int dim_embd            = 16;
+    int num_head            = 4;
+    int num_layer           = 4;
+    int dim_hidden          = 64;
+    int dim_block           = 32;    // max context (sequence) length
+    int num_training_steps  = 1000;
+    double lr               = 0.005; // fixed LR — vanilla SGD, no momentum / Adam
+    int num_samples         = 20;
 } cfg;
+// ─── Autograd Engine ────────────────────────────────────────────────────────
 struct Value;
-list<Value> param_pool, graph_pool;
-class Value
-{
+list<Value> param_pool, graph_pool;  // param_pool: weights (persistent); graph_pool: forward graph (rebuilt each step)
+class Value{                         // node in the computation graph — the autograd engine
 public:
     double data, grad;
     vector<Value*> children;
-    vector<double> local_grads;
+    vector<double> local_grads;      // ∂(this)/∂(child_i) — stored at node creation for chain rule
     Value() : data(0.0), grad(0.0) {}
     explicit Value(double d) : data(d), grad(0.0) {}
     static Value* make_new(double d, const vector<Value*>& _children = {}, const vector<double>& _grads = {}) {
@@ -40,24 +30,23 @@ public:
         v->local_grads = _grads;
         return v;
     }
-    static Value* add(Value* a, Value* b) {  return make_new(a->data + b->data, {a, b}, {1.0, 1.0});}
-    static Value* mul(Value* a, Value* b) {  return make_new(a->data * b->data, {a, b}, {b->data, a->data});}
-    static Value* sub(Value* a, Value* b) {  return make_new(a->data - b->data, {a, b}, {1.0, -1.0});}
-    static Value* log(Value* a) { return make_new(std::log(a->data), {a}, {1.0 / a->data});}
-    static Value* exp(Value* a) {  double e = std::exp(a->data); return make_new(e, {a}, {e});}
+    static Value* add(Value* a, Value* b) {                         return make_new(a->data + b->data, {a, b}, {1.0, 1.0});}
+    static Value* mul(Value* a, Value* b) {                         return make_new(a->data * b->data, {a, b}, {b->data, a->data});}
+    static Value* sub(Value* a, Value* b) {                         return make_new(a->data - b->data, {a, b}, {1.0, -1.0});}
+    static Value* log(Value* a) {                                   return make_new(std::log(a->data), {a}, {1.0 / a->data});}
+    static Value* exp(Value* a) {  double e = std::exp(a->data);    return make_new(e, {a}, {e});}
     static Value* relu(Value* a) {
-        double d = (a->data > 0) ? a->data : 0.0;
+        double d = (a->data > 0) ? a->data : 0.0; 
         double g = (a->data > 0) ? 1.0 : 0.0;
         return make_new(d, {a}, {g});
     }
-    void backward() {
-        vector<Value*> topo;
-        set<Value*> visited;
+    void backward() {               // reverse-mode AD: topological sort, then propagate gradients
+        vector<Value*> topo;                set<Value*> visited;
         build_topo(this, topo, visited);
-        this->grad = 1.0;
+        this->grad = 1.0;           // seed: dL/dL = 1
         for (auto it = topo.rbegin(); it != topo.rend(); ++it) {
             Value* v = *it;
-            for (size_t i = 0; i < v->children.size(); ++i) v->children[i]->grad += v->grad * v->local_grads[i];
+            for (size_t i = 0; i < v->children.size(); ++i) v->children[i]->grad += v->grad * v->local_grads[i]; // chain rule
         }
     }
     void build_topo(Value* v, vector<Value*>& topo, set<Value*>& visited) {
@@ -67,6 +56,7 @@ public:
         topo.push_back(v);
     }
 };
+
 class Vector{
 public:
     vector<Value*> data;
@@ -89,6 +79,8 @@ public:
         return result;
     }
 };
+
+// ─── Math Utilities ─────────────────────────────────────────────────────────
 Vector add(const Vector& a, const Vector& b) {
     Vector res; res.data.resize(a.data.size(),nullptr);
     for(size_t i=0; i<a.data.size(); ++i) res.data[i] = Value::add(a.data[i], b.data[i]);
@@ -96,15 +88,15 @@ Vector add(const Vector& a, const Vector& b) {
 }
 Vector scale(double s, const Vector& v) {
     Vector res; res.data.resize(v.data.size(),nullptr);
-    Value* s_node = Value::make_new(s); // 常数节点
+    Value* s_node = Value::make_new(s); 
     for(size_t i=0; i<v.data.size(); ++i) res.data[i] = Value::mul(s_node, v.data[i]);
     return res;
 }
-Vector softmax(const Vector& logits) {
+Vector softmax(const Vector& logits) {  // numerically stable: subtract max before exp to avoid overflow
     Vector res; res.data.resize(logits.data.size(),nullptr);
     double max_val = -1e9;
     for (auto v : logits.data) if (v->data > max_val) max_val = v->data;
-    Value* max_node = Value::make_new(max_val); // 常数
+    Value* max_node = Value::make_new(max_val);
     vector<Value*> exps;
     Value* sum_exp = Value::make_new(0.0);
     for (auto v : logits.data) {
@@ -124,16 +116,16 @@ Vector relu(const Vector& input){
     for(auto i = 0; i<input.data.size(); ++i) res.data[i] = Value::relu(input.data[i]); 
     return res;
 }
+// ─── Transformer Blocks ─────────────────────────────────────────────────────
 struct AttentionBlock {
     Matrix Wq , Wk, Wv, Wo;
     size_t dim_embd, num_head, head_dim;
     Vector forward(const Vector& x, vector<Vector>& keys, vector<Vector>& values) {
-        Vector q = Wq * x, k = Wk * x, v = Wv * x;
-        keys.push_back(k);
-        values.push_back(v);
+        Vector q = Wq * x,  k = Wk * x,                 v = Wv * x;  // linear projections, no bias
+                            keys.push_back(k);          values.push_back(v); // KV cache: grow by one token each call (causal)
         auto seq_len = keys.size();
         Vector scores; scores.data.resize(seq_len,nullptr);
-        double scale_factor = 1.0 / sqrt((double)head_dim);
+        double scale_factor = 1.0 / sqrt((double)head_dim); // scale: 1/√d_k to keep dot-products from growing too large
         Value* scale_node = Value::make_new(scale_factor);
         for(auto t=0; t<seq_len; ++t) {
             Value* dot = Value::make_new(0.0);
@@ -150,9 +142,10 @@ struct AttentionBlock {
         return output;
     }
 };
+
 struct MLPBlock{
     Matrix W1,W2;
-    Vector forward(const Vector& x) {   return W2 * relu(W1 * x);   }
+    Vector forward(const Vector& x) {   return W2 * relu(W1 * x);   } // two-layer MLP, ReLU activation, no bias
 };
 struct GPT{
     Matrix wte , wpe, lm_head;
@@ -164,9 +157,9 @@ struct GPT{
         Vector x = add(tok, pos);
         for(auto i=0; i<attn_blocks.size(); ++i) {
             Vector attn_out = attn_blocks[i].forward(x, layer_keys[i], layer_values[i]);
-            x = add(x, attn_out);
+            x = add(x, attn_out);      // residual connection
             Vector mlp_out = mlp_blocks[i].forward(x);
-            x = add(x, mlp_out);
+            x = add(x, mlp_out);       // residual connection
         }
         Vector logits = lm_head * x;
         return logits;
@@ -183,17 +176,17 @@ struct GPT{
         return ps;
     }
 };
-class Tokenize
-{
+
+// ─── Tokenizer ──────────────────────────────────────────────────────────────
+class Tokenize{
 public:
-    vector<char> vocab;
-    map<char, int> char_to_id;
+    vector<char> vocab;     map<char, int> char_to_id;
     int BOS , EOS ,UNK;
     vector<int> encode(const string& text) {
         vector<int> tokens;
         tokens.push_back(BOS); 
         for (const auto& ch : text) tokens.push_back((char_to_id[ch])?char_to_id[ch]:UNK);
-        tokens.push_back(EOS);  // 结尾加 EOS
+        tokens.push_back(EOS);  
         return tokens;
     }
     string decode(const vector<int>& tokens) {
@@ -204,16 +197,16 @@ public:
         return s;
     }
 };
-int sample(const Vector& probs)
-{
+
+// ─── Inference ──────────────────────────────────────────────────────────────
+int sample(const Vector& probs){
     static mt19937 rng(std::random_device{}()); 
     vector<double> p;
     for (size_t i = 0; i < probs.data.size(); ++i) p.push_back(probs.data[i]->data);
     discrete_distribution<int> dist(p.begin(), p.end());
     return dist(rng);
 }
-string generate(GPT& model, Tokenize& tokenizer, int max_len = 16, double temp = 0.5) 
-{
+string generate(GPT& model, Tokenize& tokenizer, int max_len = 16, double temp = 0.5) {
     graph_pool.clear();
     int n_layers = (int)model.attn_blocks.size();
     vector<vector<Vector>> layer_keys(n_layers), layer_values(n_layers); 
@@ -229,11 +222,10 @@ string generate(GPT& model, Tokenize& tokenizer, int max_len = 16, double temp =
     }
     return tokenizer.decode(generated);
 }
-int main()
-{
+// ─── Training Loop ───────────────────────────────────────────────────────────
+int main(){
     freopen("input_names.txt", "r", stdin);
-    vector<string> data;
-    string line;
+    vector<string> data;    string line;
     while (getline(cin, line)) if (!line.empty()) data.push_back(line);
     Tokenize tokenizer;
     set<char> chars;
@@ -243,9 +235,7 @@ int main()
         tokenizer.vocab.push_back(c);
     }
     tokenizer.BOS = tokenizer.vocab.size();tokenizer.EOS = tokenizer.vocab.size() + 1;tokenizer.UNK = tokenizer.vocab.size() + 2;
-    tokenizer.vocab.push_back('#'); // BOS
-    tokenizer.vocab.push_back('#'); // EOS
-    tokenizer.vocab.push_back('?'); // UNK
+    tokenizer.vocab.push_back('#'); /*BOS*/tokenizer.vocab.push_back('#'); /*EOS*/   tokenizer.vocab.push_back('?'); /*UNK  */
     cfg.num_vocab = tokenizer.vocab.size();
     GPT model;
     model.wte = Matrix();       model.wte.row = cfg.num_vocab;      model.wte.col = cfg.dim_embd;
@@ -262,7 +252,7 @@ int main()
             }
         }
     };
-    init_matrix(model.wte); init_matrix(model.wpe); init_matrix(model.lm_head);
+    init_matrix(model.wte);     init_matrix(model.wpe);             init_matrix(model.lm_head);
     int head_dim = cfg.dim_embd / cfg.num_head;
     for(int i=0; i<cfg.num_layer; ++i) {
         AttentionBlock attn;
@@ -280,7 +270,7 @@ int main()
     }
     cout << "Training..." << endl;
     for(int step = 0; step < cfg.num_training_steps; ++step) {
-        graph_pool.clear();
+        graph_pool.clear();             // free last step's computation graph before rebuilding
         const string& doc = data[step % data.size()];
         vector<int> tokens = tokenizer.encode(doc);
         int n_layers = model.attn_blocks.size();
@@ -293,23 +283,18 @@ int main()
             int target = tokens[pos + 1];
             Value* prob = probs.data[target];
             Value* log_prob = Value::log(prob);
-            total_loss = Value::sub(total_loss, log_prob);
+            total_loss = Value::sub(total_loss, log_prob); // cross-entropy: accumulate -log(p_target)
             ++count;
         }
         Value* mean_loss = Value::mul(total_loss, Value::make_new(1.0 / count));
         mean_loss->backward();
         for(auto p : model.params()) {
-            p->data -= cfg.lr * p->grad;
-            p->grad = 0.0;
+            p->data -= cfg.lr * p->grad; // vanilla SGD: no momentum, no adaptive LR
+            p->grad = 0.0;               // zero grad before next forward pass
         }
-        if(step % 10 == 0) {
-            cout << "Step " << step << " Loss: " << mean_loss->data << endl;
-        }
+        if(step % 10 == 0)  cout << "Step " << step << " Loss: " << mean_loss->data << endl;
     }
     cout << "\n=== Generated Samples ===" << endl;
-    for(int i = 0; i < cfg.num_samples; ++i) {
-        string result = generate(model, tokenizer, cfg.dim_block, 0.8);
-        cout << "  [" << i << "] " << result << endl;
-    }
+    for(int i = 0; i < cfg.num_samples; ++i) cout << "  [" << i << "] " << generate(model, tokenizer, cfg.dim_block, 0.8)<< endl;
     return 0;
 }

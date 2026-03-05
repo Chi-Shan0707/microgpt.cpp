@@ -2,7 +2,26 @@ Inspired by [Karpathy's MakeMore](https://gist.github.com/karpathy/8627fe009c40f
 
 # Introduction
 
-A minimal GPT implementation in pure Python and C++, demonstrating core deep learning concepts: autograd, backpropagation, and text generation.
+**microgpt.cpp in 300 lines**: A minimal GPT implementation in pure C++, demonstrating core deep learning concepts: autograd, backpropagation, and text generation.
+
+## Implementation Details
+
+The C++ implementation in `microgpt.cpp` follows a minimalist design:
+
+- **300-Line Core**: The entire engine (Autograd + Transformer) fits in approximately 300 lines of code.
+- **Architecture**: 
+  - GPT-style Decoder-only Transformer.
+  - Multi-head Self-Attention (without key/value caching for simplicity).
+  - Positional Encodings (Learned Embedding Table).
+  - MLP with ReLU activation.
+  - **No Bias Terms**: All linear transformations ($Wq, Wk, Wv, Wo, W1, W2$) are implemented as pure matrix multiplications without additive bias vectors to keep the code compact.
+- **Optimizer**: 
+  - **Vanilla SGD**: Fixed learning rate Stochastic Gradient Descent. 
+  - Direct gradient subtraction: `p->data -= lr * p->grad`.
+  - No Momentum or Adam-style adaptive moments.
+- **Autograd System**: 
+  - Reverse-mode automatic differentiation.
+  - Custom `Value` class managing the computation graph and topological sort.
 
 ## Core Files
 
