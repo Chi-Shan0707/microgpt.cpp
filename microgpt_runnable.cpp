@@ -295,24 +295,22 @@ struct GPT {
     }
 
     // 收集所有参数指针 (指向 param_pool)
-    vector<Value*> params() 
+    vector<Value*> params()
     {
         vector<Value*> ps;
-        auto add_mat = [&](Matrix& m) {
-            for(auto& r : m.data) for(auto& v : r) ps.push_back(v);
+        auto add = [&](auto& m) {
+            for (auto& r : m.data)
+                for (auto& v : r)
+                    ps.push_back(v);
         };
-        add_mat(wte); add_mat(wpe); add_mat(lm_head);
-        for(auto& b : attn_blocks) 
-        { 
-            add_mat(b.wq); 
-            add_mat(b.wk); 
-            add_mat(b.wv); 
-        }
-        for(auto& b : mlp_blocks) 
-        { 
-            add_mat(b.w1); 
-            add_mat(b.w2); 
-        }
+
+        // 主矩阵
+        add(wte); add(wpe); add(lm_head);
+
+        // 遍历 + 链式调用
+        for (auto& b : attn_blocks) { add(b.wq); add(b.wk); add(b.wv); }
+        for (auto& b : mlp_blocks)  { add(b.w1); add(b.w2); }
+
         return ps;
     }
 };
@@ -333,24 +331,38 @@ Matrix rand_matrix(int rows, int cols) {
     return m;
 }
 
-// ── Tokenizer ────────────────
-class Tokenize 
+// ── Tokenizer (BOS + EOS 版本) ────────────────
+class Tokenize
 {
 public:
     vector<char> vocab;
     map<char, int> char_to_id;
-    int BOS;
+    int BOS;  // Begin Of Sequence
+    int EOS;  // End Of Sequence
+
+    // 编码：字符串 → token 序列，首尾添加 BOS/EOS
     vector<int> encode(const string& text) {
         vector<int> tokens;
+        tokens.push_back(BOS);  // 开头加 BOS
+
         for (char ch : text) {
-            if (char_to_id.count(ch)) tokens.push_back(char_to_id[ch]);
-            else tokens.push_back(BOS);
+            if (char_to_id.count(ch))
+                tokens.push_back(char_to_id[ch]);
+            else
+                tokens.push_back(BOS);  // 未知字符用 BOS 代替
         }
+
+        tokens.push_back(EOS);  // 结尾加 EOS
         return tokens;
     }
+
+    // 解码：token 序列 → 字符串，跳过 BOS/EOS
     string decode(const vector<int>& tokens) {
         string s;
-        for(int id : tokens) if(id >=0 && id < (int)vocab.size() && id != BOS) s += vocab[id];
+        for (int id : tokens) {
+            if (id >= 0 && id < (int)vocab.size() && id != BOS && id != EOS)
+                s += vocab[id];
+        }
         return s;
     }
 };
@@ -435,7 +447,9 @@ int main() {
         tokenizer.vocab.push_back(c);
     }
     tokenizer.BOS = tokenizer.vocab.size();
-    tokenizer.vocab.push_back('#');
+    tokenizer.vocab.push_back('<');  // BOS 字符
+    tokenizer.EOS = tokenizer.vocab.size();
+    tokenizer.vocab.push_back('>');  // EOS 字符
     cfg.vocab_size = tokenizer.vocab.size();
 
     // 3. Init Model
@@ -467,10 +481,8 @@ int main() {
         graph_pool.clear();
         
         string doc = data[step % data.size()];
-        vector<int> tokens = {tokenizer.BOS};
-        auto enc = tokenizer.encode(doc);
-        tokens.insert(tokens.end(), enc.begin(), enc.end());
-        tokens.push_back(tokenizer.BOS);
+        // encode 已包含 BOS/EOS，直接使用
+        vector<int> tokens = tokenizer.encode(doc);
         
         int n_layers = (int)model.attn_blocks.size();
         vector<vector<Vector>> layer_keys(n_layers), layer_values(n_layers);

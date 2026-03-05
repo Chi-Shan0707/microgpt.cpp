@@ -2,7 +2,7 @@
 #include<ctime>
 int main()
 {
-    freopen("input.txt","w",stdout);
+    freopen("input_math.txt","w",stdout);
     srand(42);  // 固定种子，使随机数可复现
     for(int i=0; i< 10000; ++i)
     {

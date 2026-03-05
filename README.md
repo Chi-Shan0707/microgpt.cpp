@@ -1,17 +1,43 @@
-Inspired by [Karpathy](https://gist.github.com/karpathy/8627fe009c40f57531cb18360106ce95)
+Inspired by [Karpathy's MakeMore](https://gist.github.com/karpathy/8627fe009c40f57531cb18360106ce95)
 
 # Introduction
 
-This repository gives a `c++` version of `microgpt.py`   
+A minimal GPT implementation in pure Python and C++, demonstrating core deep learning concepts: autograd, backpropagation, and text generation.
 
-- `microgpt.py` : Karpathy's original code
-- `microgpt_annotated.py`: code with comments and notes by AI
-- `microgpt_runnable.cpp`: my (m)c++ version of microgpt; it's runnable, but not elegant and readable enough
-- `microgpt.cpp`: a concise and readable version (it is underway)
+## Core Files
+
+| File | Language | Purpose | Status |
+|------|----------|---------|--------|
+| `microgpt.py` | Python | Karpathy's original reference implementation | Reference |
+| `microgpt_annotated.py` | Python | Educational version with detailed comments | Learning |
+| `microgpt_runnable.cpp` | C++ | Full implementation, less polished | Functional |
+| `microgpt.cpp` | C++ | Concise, readable, production version | **Recommended** |
+
+## Features
+
+- **Single-file implementation** with no external dependencies (C++ only)
+- **Autograd system** with automatic differentiation via computation graphs
+- **Multi-head attention** with positional encoding
+- **MLP feedforward** layers with ReLU activation
+- **Training** with cross-entropy loss and SGD optimization
+- **Generation** with temperature scaling for diversity
 
 # Requirements
-- python: no dependencies
-- c++: >= C++11
+- **Python**: no dependencies (for `.py` files)
+- **C++**: >= C++11 (for `.cpp` files)
+
+## Build & Run (C++)
+
+```bash
+g++ -O2 -std=c++14 -o microgpt microgpt.cpp
+./microgpt
+```
+
+The program reads from `input_names.txt`, trains for 1000 steps, and generates 20 sample names.
+
+## Training Target: Generate Names
+
+The model learns to generate plausible English names from `input_names.txt` during training.
 
 ## Interesting tasks #0 
 - Generate English names
