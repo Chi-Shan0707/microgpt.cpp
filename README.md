@@ -15,10 +15,11 @@ The C++ implementation in `microgpt.cpp` follows a minimalist design:
   - Positional Encodings (Learned Embedding Table).
   - MLP with ReLU activation.
   - **No Bias Terms**: All linear transformations ($Wq, Wk, Wv, Wo, W1, W2$) are implemented as pure matrix multiplications without additive bias vectors to keep the code compact.
-- **Optimizer**: 
-  - **Vanilla SGD**: Fixed learning rate Stochastic Gradient Descent. 
-  - Direct gradient subtraction: `p->data -= lr * p->grad`.
-  - No Momentum or Adam-style adaptive moments.
+- **Optimizer**:
+  - **Adam**: Adaptive moment estimation with bias correction.
+  - First moment (m): exponential moving average of gradients.
+  - Second moment (v): exponential moving average of squared gradients.
+  - Bias-corrected update: `p -= lr * m_hat / (sqrt(v_hat) + eps)`.
 - **Autograd System**: 
   - Reverse-mode automatic differentiation.
   - Custom `Value` class managing the computation graph and topological sort.
@@ -38,7 +39,7 @@ The C++ implementation in `microgpt.cpp` follows a minimalist design:
 - **Autograd system** with automatic differentiation via computation graphs
 - **Multi-head attention** with positional encoding
 - **MLP feedforward** layers with ReLU activation
-- **Training** with cross-entropy loss and SGD optimization
+- **Training** with cross-entropy loss and Adam optimization
 - **Generation** with temperature scaling for diversity
 
 # Requirements
