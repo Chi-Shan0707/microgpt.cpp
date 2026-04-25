@@ -91,9 +91,7 @@ public:
 
     // 反向传播
     void backward() {
-        vector<Value*> topo;
-        set<Value*> visited;
-        build_topo(this, topo, visited);
+        vector<Value*> topo = build_topo(this);
         
         this->grad = 1.0;
         
@@ -107,11 +105,19 @@ public:
     }
 
 private:
-    void build_topo(Value* v, vector<Value*>& topo, set<Value*>& visited) {
-        if (visited.find(v) != visited.end()) return;
-        visited.insert(v);
-        for (auto child : v->children) build_topo(child, topo, visited);
-        topo.push_back(v);
+    static vector<Value*> build_topo(Value* root) {
+        vector<Value*> topo;
+        set<Value*> visited;
+        // DFS 构建后序拓扑序
+        auto dfs = [&](auto&& self, Value* v) -> void {
+            if (visited.find(v) != visited.end()) return;
+            visited.insert(v);
+            for (auto child : v->children) self(self, child);
+            topo.push_back(v);
+        };
+
+        dfs(dfs, root);
+        return topo;
     }
 };
 
